@@ -1,5 +1,5 @@
 # wordshl
-an (attempted) TUI Wordle clone for bash
+`wordshl` - an (attempted) TUI Wordle clone for bash
 
 ![disco](anstw.png)
 
@@ -24,6 +24,8 @@ https://github.com/thisisparker/cursewords
 # Usage
 
 It looks for the wordle answer and guess files by default.
+
+`--words` can be used to specify a single file for both answers and guesses. 
 
     --strict      on|off  [default: on]
         Guesses must be a valid word from guess file
