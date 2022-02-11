@@ -22,7 +22,7 @@ show_help () {
     green=$(tput setaf 119)
     red=$(tput setaf 196)
     normal=$(tput sgr0)
-    printf "%s\n" "$0: a TUI Wordle clone for bash."
+    printf "%s\n" "$0: an (attempted) TUI Wordle clone for bash."
     printf %s \
  "${red}┌₁──┬₂──┬₃──┬₄──┬₅──┬₆──┬₇──┐
 ${normal}| W | O | R | D | S | H | L |
