@@ -68,6 +68,8 @@ wordle_guesses.txt`  files in the current directory by default.
         
 # Too easy?
 
+How about some `--word-len 24`?
+
 ![tooeasy](herd.png)
 
 # Demo
