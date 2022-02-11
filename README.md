@@ -3,32 +3,27 @@ an (attempted) TUI Wordle clone for bash
 
 ![disco](anstw.png)
 
-It looks for the wordle answer and guess files by default.
-
-![screenshot](first.png)
-
-Alternate wordlists and word lengths can be specified:
-
-![tooeasy](herd.png)
-
-`hard-mode` can also be enabled.
-
 Inspiration:
 
-      https://www.powerlanguage.co.uk/wordle/
-      https://github.com/thisisparker/cursewords
+https://www.powerlanguage.co.uk/wordle/
+
+https://github.com/thisisparker/cursewords
 
 # Keybindings
 
-    `ctrl-l` to move to the first column
+`ctrl-l` to move to the first column
 
-    `ctrl-r` to reveal the answer 
+`ctrl-r` to reveal the answer 
 
-    `tab` and `backspace` to navigate forward/backwards
+`tab` and `backspace` to navigate forward/backwards
 
-    `space` to blank the current column
+`space` to blank the current column
+
+![screenshot](first.png)
 
 # Usage
+
+It looks for the wordle answer and guess files by default.
 
     --strict      on|off  [default: on]
         Guesses must be a valid word from guess file
@@ -62,3 +57,7 @@ Inspiration:
 
     --disco 
         You know the rules?
+        
+# Too easy?
+
+![tooeasy](herd.png)
