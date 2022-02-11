@@ -1,0 +1,1140 @@
+#!/bin/bash
+
+: <<'EOF'
+Odd behaviour:
+    `stty raw` is used as `read -s` still shows chars 
+    if you try hard enough.
+
+    ctrl-c was leaving the terminal in raw mode even 
+    though stty settings were being restored in the sigint handler.
+
+    May be related to 
+    [this](https://github.com/bminor/bash/blob/master/builtins/read.def#L508)
+    which I found [here](https://stackoverflow.com/questions/67334588/)
+
+    moving the `stty` restoration into an `exit` handler 
+    seems to "fix the issue"
+
+    sigwinch differences between bash versions / resizing
+EOF
+
+show_help () {
+    green=$(tput setaf 119)
+    red=$(tput setaf 196)
+    normal=$(tput sgr0)
+    printf "%s\n" "$0: a TUI Wordle clone for bash."
+    printf %s \
+ "${red}┌₁──┬₂──┬₃──┬₄──┬₅──┬₆──┬₇──┐
+${normal}| W | O | R | D | S | H | L |
+${green}└───┴───┴───┴───┴───┴───┴───┘${normal}
+    --strict      on|off  [default: on]
+        Guesses must be a valid word from guess file
+
+    --hard-mode   off|on  [default: off]
+        Any revealed hints must be used in subsequent guesses
+
+    --word-len            [default: 5]
+        Length of word 
+
+    --num-guesses         [default: 6] # \$((RANDOM % 3 + 2))
+        Number of guesses 
+
+    --answer-file         [default: ./wordle_answers.txt]
+        Path to wordlist of allowed answers
+
+    --guess-file          [default: ./wordle_guesses.txt]
+        Path to wordlist of allowed guesses
+
+    --words          
+        Path to wordlist of --answer-file/--guess-file
+
+    --col N               [default: \"center\"]
+        Display grid at Nth \"column\" on screen
+
+    --row N               [default: \"above-center\"]
+        Display grid at Nth \"row\" on screen
+
+    --vt100
+        Use vt100 box-drawing characters for grid
+
+    --disco 
+        You know the rules?
+
+Inspiration:
+      https://www.powerlanguage.co.uk/wordle/
+      https://github.com/thisisparker/cursewords
+
+"
+}
+
+parse_args () {
+    # basic attempt at some useful arguments
+    while (($#))
+    do
+        case $1 in
+                 --strict)      strict=$2; shift;;
+              --hard-mode)   hard_mode=$2; shift;;
+               --word-len)    word_len=$2; shift;;
+            --num-guesses) num_guesses=$2; shift;;
+            --answer-file) answer_file=$2; shift;;
+             --guess-file)  guess_file=$2; shift;;
+                  --words)   word_file=$2; shift;;
+                    --col)   start_col=$2; shift;;
+                    --row)   start_row=$2; shift;;
+                  --vt100)     vt100=True;  true;;
+                  --disco)     disco=True;  true;;
+                -h|--help)      show_help;  exit;;
+            *) echo "$0: unrecognized option: \`$1'"; 
+               exit 1;;
+        esac
+        shift
+    done
+
+    [[ $word_len && $word_len -lt 2 ]] && { 
+        echo "$0: --word-len must be greater than 1"
+        exit 1
+    }
+
+    [[ $hard_mode = on && $strict = off ]] && {
+        echo "$0: cannot use \`--hard-mode on' with \`--strict off'"
+        exit 1
+    }
+
+    [[ $num_guesses && $num_guesses -lt 1 ]] && { 
+        echo "$0: --num-guesses must be greater than 0"
+        exit 1
+    }
+
+    [[ $start_col && $start_col -lt 1 ]] && { 
+        echo "$0: --col must be greater than 0"
+        exit 1
+    }
+
+    [[ $start_row && $start_row -lt 1 ]] && { 
+        echo "$0: --row must be greater than 0"
+        exit 1
+    }
+
+    [[ $disco ]] && {
+        # FIXME there should be a proper function to populate
+        # the grid cells - a better "display_result" to avoid
+        # the duplicate code
+        # FIXME can colors be hardcoded without needing tput?
+        colors=()
+        for i in {1..256}
+        do
+            colors+=("$(tput setaf "$i")")
+        done
+        dance=( 
+            "\o/" "\o," "\o|" "|o/" "|o," ",o|"
+            "_o/" ".o/" "\o_" "<o/" "_o," ",o_"
+            "\o." "\o>" ",o/" "<o>" ".o_" "_o."
+            "<o." ".o>" ",o>" "<o," ".o." ",o,"
+            "~o." ".o~" "~o>" "<o~" ",o~" "~o,"
+        )
+        qwerty=(
+          " " Y O U " " " " K N O W 
+          " " " " T H E " " R U L E S 
+          \?
+        ) 
+        word_len=8
+        num_guesses=5
+
+        check_terminal
+        build_screen
+
+        printf %s "$clear_screen"
+        emoji=${dance[RANDOM % ${#dance[@]}]}
+        for times in {1..50}
+        do 
+            build_grid
+
+            printf %s "$top_left_screen"
+            printf %s "$leftpad$score"
+            printf "\r\n\r"
+
+            for line in "${grid[@]}"
+            do
+                printf %s "$leftpad$grid_color$line"
+                printf "\r\n"
+            done
+            printf %s "$alert$clear_line"
+            printf %s "$mood$emoji$normal"
+
+            words=(AIN\'T NO STRANGER TO WORDS)
+            for ((i=0; i<${#words[@]}; i++))
+            do
+                ((cell = word_len * i))
+                for ((j=0; j<${#words[i]}; j++))
+                do
+                    printf %s "${cells[cell]}"
+                    printf %s "${words[i]:j:1}"
+                    ((cell++))
+                done
+            done
+            printf "\r\n\r\n"
+            printf %s "$keyboard"
+            printf %s "$hide_cursor"
+            sleep .1337
+            emoji=${dance[RANDOM % ${#dance[@]}]}
+            ((times==49)) && emoji="\o/"
+        done
+
+        printf %s "$show_cursor$normal"
+
+        exit
+    }
+
+    hard_mode=${hard_mode:=off}
+    strict=${strict:=on}
+    answer_file=${answer_file:=wordle_answers.txt}
+    guess_file=${guess_file:=wordle_guesses.txt}
+    word_len=${word_len:=5}
+    num_guesses=${num_guesses:=6}
+
+    [[ $word_file ]] && {
+        answer_file=$word_file 
+        guess_file=$word_file
+    }
+}
+
+check_terminal () {
+    term_width=$(tput cols)
+    term_height=$(tput lines)
+
+    ((game_width = (4 * word_len) + 1))
+    ((start_y = (term_width - game_width) / 2))
+
+    ((term_width < (game_width + ${start_col:-1} - 1))) && {
+        ((needed_width = (game_width + ${start_col:-1} - 1)))
+        printf %s "$clear_screen"
+        printf "Terminal not wide enough:"
+        printf "\r\n"
+        printf "    "
+        printf "declare -- needed_width=\"%s\"\r\n" "$needed_width"
+        printf "    "
+        printf "declare --   term_width=\"%s\"\r\n" "$term_width"
+        [[ $game_start ]] || exit 1
+        return 1
+    }
+    ((start_col)) && ((start_y = start_col - 1))
+
+    # manual pad as printf does not like utf8boxchars
+    printf -v leftpad "%*s" "$start_y"
+
+    start_x=6 
+    # game_height depends on keyboard_height
+    build_keyboard
+
+    ((game_height = 
+        start_x + (2 * num_guesses) + keyboard_height + 1))
+
+    # minimum height game fits into
+    ((term_height < (${start_row:-1}  - 1) + game_height)) && {
+        ((needed_height = (${start_row:-1} - 1) + game_height))
+        printf %s "$clear_screen"
+        printf "I wish I was a little bit taller:"
+        printf "\r\n"
+        printf "    "
+        printf "declare -- needed_height=\"%s\"\r\n" "$needed_height"
+        printf "    "
+        printf "declare --   term_height=\"%s\"\r\n" "$term_height"
+        [[ $game_start ]] || exit 1
+        return 1
+    }
+
+    game_paused=False
+
+    return 0
+}
+
+build_screen () {
+    blank=" "
+    green=${green:=$(tput setaf 119)}
+    yellow=${yellow:=$(tput setaf 184)}
+    red=${red:=$(tput setaf 196)}
+    normal=${normal:=$(tput sgr0)}
+    reverse=${reverse:=$(tput rev)}
+
+    save_cursor=${save_cursor:=$(tput sc)}
+    restore_cursor=${restore_cursor:=$(tput rc)}
+    clear_line=${clear_line:=$(tput el)}
+
+    hide_cursor=${hide_cursor:=$(tput civis)}
+    show_cursor=${show_cursor:=$(tput cnorm)}
+    clear_screen=${clear_screen:=$(tput clear)}
+
+    backspace=${backspace:=$(tput cub 1)}
+    prev_cell=${prev_cell:=$(tput cub 4)}
+    next_cell=${next_cell:=$(tput cuf 4)}
+
+    # try to place grid just above center
+    if ((start_row))
+    then
+        ((start_x += (start_row - 1)))
+    else
+        ((offset = (term_height - game_height) / 2))
+        ((offset - start_x > 
+            (start_x - start_x / 2))) && ((offset -= start_x))
+        ((start_x += offset))
+    fi
+
+    top_left_screen=$(tput cup "$((start_x-6))" 0)
+
+    cursor_x=$start_x
+
+    ((cursor_y = start_y + 2))
+    ((alert_x = cursor_x - 2))
+
+    alert=$(tput cup "$alert_x" "$start_y")
+    ((mood_y = start_y + game_width - 3))
+    mood=$(tput cup "$alert_x" "$mood_y")
+    error=$mood$blank
+
+    # store each xy coord to explicitly position cursor
+    # using start cell of each row as a reference point
+    cells=()
+    for ((i=0, x=cursor_x; i<num_guesses; i++))
+    do
+        cell=$(tput cup "$x" "$cursor_y")
+        cells+=("$cell")
+        for ((j=1; j<word_len; j++))
+        do
+            cell+=$next_cell
+            cells+=("$cell")
+        done
+        ((x += 2))
+    done
+}
+
+build_grid () {
+    # FIXME find suitable fallback chars
+    cell_width=3 
+    pipe=▌
+    block=█
+    top_left_corner=┌ 
+    top_right_corner=┐
+    top_right_corner=┐
+    horizontal=─ 
+    vertical_left=├
+    vertical_right=┤
+    vertical=\|
+    bottom_left_corner=└
+    bottom_right_corner=┘ 
+    row_cell_sep=┼
+    bottom_cell_sep=┴ 
+    top_cell_sep=┬ 
+    numbers=₀₁₂₃₄₅₆₇₈₉
+
+    # https://en.wikipedia.org/wiki/Box-drawing_character
+    [[ $vt100 ]] && {
+        printf -v bottom_right_corner "\x1b(0\x6a\x1b(B"
+        printf -v top_right_corner    "\x1b(0\x6b\x1b(B"
+        printf -v top_left_corner     "\x1b(0\x6c\x1b(B"
+        printf -v bottom_left_corner  "\x1b(0\x6d\x1b(B"
+        printf -v row_cell_sep        "\x1b(0\x6e\x1b(B"
+        printf -v horizontal          "\x1b(0\x71\x1b(B"
+        printf -v vertical_left       "\x1b(0\x74\x1b(B"
+        printf -v vertical_right      "\x1b(0\x75\x1b(B"
+        printf -v bottom_cell_sep     "\x1b(0\x76\x1b(B"
+        printf -v top_cell_sep        "\x1b(0\x77\x1b(B"
+        printf -v vertical            "\x1b(0\x78\x1b(B"
+        numbers=
+    }
+
+    grid_top= 
+    grid_bottom= 
+    grid_row_sep= 
+    grid_row= 
+    grid_border= 
+    grid=
+
+    for ((i=0; i<cell_width; i++))
+    do 
+        grid_border+=$horizontal
+    done
+
+    for ((i=1; i<=word_len; i++))
+    do
+        col_num=$i
+        for ((n=0; n<${#numbers}; n++))
+        do
+            col_num=${col_num//$n/${numbers:n:1}}
+        done
+
+        grid_top+=${colors[RANDOM % 256]}$col_num
+        for ((n=0; n < (cell_width - ${#col_num}); n++))
+        do
+            grid_top+=${colors[RANDOM % 256]}$horizontal
+        done
+
+        grid_bottom+=${colors[RANDOM % 256]}$grid_border
+        grid_row+=${colors[RANDOM % 256]}$grid_border
+        grid_row_sep+=${colors[RANDOM % 256]}$grid_border
+
+        ((i < word_len)) && 
+            grid_top+=${colors[RANDOM % 256]}$top_cell_sep
+        ((i < word_len)) && 
+            grid_bottom+=${colors[RANDOM % 256]}$bottom_cell_sep
+        ((i < word_len)) && 
+            grid_row_sep+=${colors[RANDOM % 256]}$row_cell_sep
+
+        grid_row+=${colors[RANDOM % 256]}$vertical
+    done
+
+    grid_top=${colors[RANDOM % 256]}$top_left_corner$grid_top
+    grid_top+=${colors[RANDOM % 256]}$top_right_corner
+    grid_bottom=${colors[RANDOM % 256]}$bottom_left_corner$grid_bottom
+    grid_bottom+=${colors[RANDOM % 256]}$bottom_right_corner
+
+    grid_row=$vertical${grid_row//$horizontal/ }
+    grid_row_sep=${colors[RANDOM % 256]}$vertical_left$grid_row_sep
+    grid_row_sep+=${colors[RANDOM % 256]}$vertical_right
+
+    grid=("$grid_top" "$grid_row" "$grid_bottom" "" "$grid_top")
+
+    for ((i=1; i<num_guesses; i++))
+    do
+        grid+=("$grid_row" "$grid_row_sep")
+    done
+
+    grid+=("$grid_row" "$grid_bottom")
+}
+
+build_keyboard () {
+    line=
+    keyboard=()
+    [[ $qwerty ]] || qwerty=(
+        Q W E R T Y U I O
+        P A S D F G H J K
+        L Z X C V B N M
+    )
+
+    ((max_len_line = game_width - 2))
+    for letter in "${qwerty[@]}"
+    do
+        ((${#line} <= max_len_line)) && {
+            line+="$letter "
+        } || {
+            keyboard+=("$leftpad $line")
+            line="$letter "
+        }
+    done
+
+    # center last line 
+    line=${line% }
+    ((pad_len = (max_len_line - ${#line}) / 2))
+    line_len=${#line}
+    #((pad_len % 2 == 1)) && ((pad_len++))
+
+    printf -v center_pad "%*s" "$pad_len" 
+    keyboard+=("$leftpad $center_pad$line")
+
+    keyboard_height=${#keyboard[@]}
+
+    printf -v keyboard "%s\r\n" "${keyboard[@]}"
+}
+
+pick_random_word () {
+    # using while read loops was too slow
+    # awk was faster than grep 
+    count_words_cmd=(
+        awk -v "word_len=$word_len" 
+            'length == word_len { count++ } END { print count }'
+            "$answer_file"
+    )
+    num_words=$("${count_words_cmd[@]}")
+
+    ((num_words > 0)) || {
+        printf "No words found:\r\n    "
+        printf "%q " "${count_words_cmd[@]}"
+        printf "\r\n"
+        exit 1
+    }
+
+    ((line_num = (RANDOM % num_words) + 1))
+    random_word_cmd=(
+        awk -v "word_len=$word_len" -v "line_num=$line_num"
+          'length == word_len { count++ } 
+           count  == line_num { print toupper($0); exit }' 
+          "$answer_file"
+    )
+    random_word=$("${random_word_cmd[@]}")
+
+    ((${#random_word})) || { 
+        printf "No words found:\r\n    "
+        printf "%q " "${random_word_cmd[@]}"
+        printf "\r\n"
+        exit 1
+    }
+
+    [[ $strict = on ]] && {
+        count_guess_cmd=(
+            awk -v code=1 -v "word_len=$word_len" 
+              'length == word_len { code=0; exit } END { exit code }'
+              "$guess_file"
+        )
+        "${count_guess_cmd[@]}" || { 
+            printf "No guesses found:\r\n    "
+            printf "%q " "${count_guess_cmd[@]}"
+            printf "\r\n"
+            exit 1;
+        }
+    }
+
+    word=()
+    for ((i=0; i<${#random_word}; i++))
+    do 
+        word+=("${random_word:i:1}")
+    done
+}
+
+check_guess () {
+    [[ "${guess[@]}" = "${word[@]}" ]] && {
+        for letter in "${guess[@]}"
+        do
+            keyboard=${keyboard/$letter/ }
+        done
+        result=win
+        game_over=True
+        return 1
+    }
+
+    row=
+    current_guess=
+
+    [[ $hard_mode = on ]] && ((current_row > 1)) && {
+        # all greens/yellows from previous guess
+        # are required to be used in current guess
+        required=()
+        remainder=()
+        # check greens
+        for ((i=0; i<${#word[@]}; i++))
+        do
+            required[i]=$blank
+            remainder[i]=${guess[i]}
+            [[ ${greens[i]} = $blank ]] && continue
+            # print green block above column of required letter
+            [[ ${guess[i]} != ${greens[i]} ]] && {
+                required[i]=$green$block$normal
+                printf %s "$save_cursor$alert"
+                printf " "
+                printf " %s  " "${required[@]}"
+                printf %s "$restore_cursor"
+                return 1
+            } || { remainder[i]=$blank; }
+        done
+        # check yellows
+        for ((i=0; i<${#word[@]}; i++))
+        do
+            letter=${yellows[i]}
+            [[ $letter = $blank ]] && continue
+            # print yellow block above column of required letter
+            [[ ${remainder[@]} != *$letter* ]] && {
+                required[i]=$yellow$block$normal
+                printf %s "$save_cursor$alert"
+                printf " " 
+                printf " %s  " "${required[@]}"
+                printf %s "$restore_cursor"
+                return 1
+            }
+        done
+    }
+
+    # turn back into lowercase string for grep
+    for c in "${guess[@]}"
+    do
+        # v3: ^_^ v4: ${var,} v5: ${var@L}
+        case $c in A) c=a;; B) c=b;; esac
+        case $c in C) c=c;; D) c=d;; esac
+        case $c in E) c=e;; F) c=f;; esac
+        case $c in G) c=g;; H) c=h;; esac
+        case $c in I) c=i;; J) c=j;; esac
+        case $c in K) c=k;; L) c=l;; esac
+        case $c in M) c=m;; N) c=n;; esac
+        case $c in O) c=o;; P) c=p;; esac
+        case $c in Q) c=q;; R) c=r;; esac
+        case $c in S) c=s;; T) c=t;; esac
+        case $c in U) c=u;; V) c=v;; esac
+        case $c in W) c=w;; X) c=x;; esac
+        case $c in Y) c=y;; Z) c=z;; esac
+        [[ $c != " " ]] && current_guess+=$c
+    done
+
+    [[ $strict = on ]] && {
+        ((${#current_guess} != ${#word[@]})) && {
+            printf %s "$alert"
+            printf "!word"
+            printf %s "$error"
+            printf %s "$red"
+            printf "X"
+            printf %s "$normal"
+            printf %s "$clear_line"
+            return 1
+        }
+        grep -q -x "$current_guess" "$guess_file" || {
+            printf %s "$alert"
+            printf "!word"
+            printf %s "$error"
+            printf %s "$red"
+            printf "X"
+            printf %s "$normal"
+            printf %s "$clear_line"
+            return 1
+        }
+    }
+
+    cell_color=()
+    remainder=()
+    for ((i=0; i<${#word[@]}; i++))
+    do 
+        cell_color+=("")
+        remainder+=${word[i]}
+    done
+    # check greens 
+    for ((i=0; i<${#word[@]}; i++))
+    do
+        letter=${guess[i]}
+        [[ $letter = ${word[i]} ]] && {
+            cell_color[i]=$green
+            greens[i]=$letter
+            remainder=${remainder/$letter}
+        } 
+    done
+
+    # check yellows
+    yellows=()
+    for ((i=0; i<${#word[@]}; i++))
+    do
+        yellows[i]=$blank
+        letter=${guess[i]}
+        [[ $remainder = *$letter* && ${cell_color[i]} = "" ]] && {
+            cell_color[i]=$yellow
+            remainder=${remainder/$letter}
+            yellows[i]=$letter
+        }
+        label=$pipe
+        [[ ${cell_color[i]} = "" ]] && { label=$blank; }
+        row+="$vertical${cell_color[i]}$label$normal$letter "
+        keyboard=${keyboard/$letter/ }
+    done
+
+    row+=$vertical
+
+    printf "\r"
+    printf %s "$leftpad"
+    printf %s "$row"
+    # used to save row state incase of resize
+    guess_log+=("$row")
+
+    # update display of green letters found so far
+    printf %s "$top_left_screen"
+    printf "\r\n\r\n"
+
+    printf %s "$leftpad"
+    printf %s "$vertical"
+    for value in "${greens[@]}"
+    do
+        printf %s " $value $vertical"
+    done
+
+    # move cursor to last cell in order to get to keyboard
+    printf %s "${cells[${#cells[@]}-1]}"
+    printf "\r\n\r\n"
+    printf "\r"
+    printf %s "$keyboard"
+
+    return 0
+}
+
+display_result () {
+    case $result in 
+        win)
+            grid_color=$green
+            emoji=\\o/
+            ((score++))
+            ;;
+        lose)
+            grid_color=$red
+            emoji=:-\|
+            score=0
+            ;;
+        bye)
+            grid_color=$red
+            emoji=o/
+            ;;
+    esac
+
+    answer=
+    for letter in "${word[@]}"
+    do
+        answer+="$grid_color$vertical$normal $letter " 
+    done
+    answer=$leftpad$answer
+
+    printf %s "$top_left_screen"
+    printf %s "$leftpad$score"
+    printf "\r\n\r"
+
+    need_clear_line=$clear_line
+    ((needed_width == term_width)) && need_clear_line=
+    for line in "${grid[@]}"
+    do
+        printf %s "$leftpad$grid_color$line$need_clear_line"
+        printf "\r\n"
+    done
+
+    printf %s "$top_left_screen"
+    printf "\r\n\r\n"
+    printf "\r"
+    printf %s "$answer"
+    printf "\r\n\r\n"
+    printf %s "$alert$clear_line"
+    printf "\r\n\r\n"
+    printf %s "$mood$emoji$normal"
+    printf "\r\n\r\n"
+
+    for ((i=0; i<num_guesses; i++))
+    do
+        printf "\r"
+        printf %s "$answer"
+        printf "\r\n\r\n"
+    done
+
+    #printf %s "$keyboard"
+    #tput ed
+    #printf %s "$hide_cursor"
+}
+
+play () {
+    pick_random_word
+
+    current_row=1
+    current_col=1
+    
+    greens=()
+    guess=()
+    guess_log=() 
+
+    for ((i=0; i<${#word[@]}; i++))
+    do 
+        guess+=("$blank")
+        greens+=("$blank")
+    done
+
+    build_grid
+
+    qwerty=
+    keyboard=
+    build_keyboard
+
+    game_over=
+    result=lose
+    score=${score:=0}
+
+    printf %s "$hide_cursor"
+    # do not clear screen if we are already playing
+    # as it was visible on copy.sh vt100
+    [[ $game_start ]] || printf %s "$clear_screen"
+
+    printf %s "$top_left_screen"
+
+    printf %s "$leftpad$score"
+    printf "\r\n\r"
+    for line in "${grid[@]}"
+    do
+        printf %s "$leftpad$line"
+        printf "\r\n"
+    done
+    printf %s "$keyboard"
+
+    cell_num=1
+    printf %s "$alert$cell_num"
+
+    start_cell=${cells[0]}
+    printf %s "$start_cell"
+
+    # "show cursor"
+    printf %s "$reverse"
+    printf %s "${guess[current_col-1]}"
+    printf %s "$normal"
+    printf %s "$backspace"
+
+    game_start=True 
+
+    while IFS= read -s -r -d '' -n 1 c
+    do 
+        [[ $game_paused = True ]] && continue
+
+        # expliticly reposition cursor
+        ((current_cell = 
+            (word_len * (current_row - 1)) 
+                       + current_col - 1))
+        printf %s "${cells[current_cell]}"
+
+        case $c in 
+        [\ abcdefghijklmnopqrstuvwxyz])
+            printf %s "$alert$clear_line"
+            printf %s "${cells[current_cell]}"
+            # v3: ^_^ v4: ${var^} v5: ${var@L}
+            case $c in a) c=A;; b) c=B;; esac
+            case $c in c) c=C;; d) c=D;; esac
+            case $c in e) c=E;; f) c=F;; esac
+            case $c in g) c=G;; h) c=H;; esac
+            case $c in i) c=I;; j) c=J;; esac
+            case $c in k) c=K;; l) c=L;; esac
+            case $c in m) c=M;; n) c=N;; esac
+            case $c in o) c=O;; p) c=P;; esac
+            case $c in q) c=Q;; r) c=R;; esac
+            case $c in s) c=S;; t) c=T;; esac
+            case $c in u) c=U;; v) c=V;; esac
+            case $c in w) c=W;; x) c=X;; esac
+            case $c in y) c=Y;; z) c=Z;; esac
+           
+            guess[current_col-1]=$c
+
+            ((current_col==word_len)) && {
+                printf %s "$reverse"
+                printf %s "$c"
+                printf %s "$normal"
+                printf %s "$backspace"
+            }
+
+            ((current_col==word_len)) || {
+                ((current_col++))
+                printf %s "$c"
+                printf %s "$normal"
+                printf %s "$backspace"
+                printf %s "$next_cell"
+                printf %s "$reverse"
+                printf %s "${guess[current_col-1]}"
+                printf %s "$normal"
+                printf %s "$backspace"
+
+                ((cell_num++))
+            }
+            printf %s "$alert"
+            printf %s "$cell_num"
+            ;;
+
+        # "backspace" - move to previous cell
+        $'\177')
+            ((current_col==1)) || {
+                printf %s "$normal"
+                printf %s "${guess[current_col-1]}"
+                ((current_col--))
+
+                printf %s "$prev_cell"
+                printf %s "$backspace"
+                printf %s "$reverse"
+                printf %s "${guess[current_col-1]}"
+                printf %s "$normal"
+                printf %s "$backspace"
+            
+                ((cell_num--))
+                printf %s "$alert"
+                printf %s "$clear_line"
+                printf %s "$cell_num"
+            }
+            ;;
+
+        # "enter"
+        $'\n')
+            check_guess && {
+                [[ $result = win ]] && break
+                # reset guess
+                guess=()
+                for ((i=0; i<${#word[@]}; i++))
+                do 
+                    guess[i]=$blank
+                done
+
+                # check for remaining guesses
+                current_col=1 
+                ((current_row++))
+                ((current_row > num_guesses)) && {
+                    result=lose
+                    game_over=True
+                    break
+                }
+
+                # move to first cell in next row
+                ((current_cell = 
+                    (word_len * (current_row - 1)) 
+                               + current_col - 1))
+                printf %s "${cells[current_cell]}"
+                printf %s "$reverse"
+                printf %s "${guess[current_col-1]}"
+                printf %s "$normal"
+
+                ((cell_num = current_cell + 1))
+                printf %s "$alert"
+                printf %s "$clear_line"
+                printf %s "$cell_num"
+            }
+            [[ $game_over ]] && break
+            ;;
+
+         # XXX pressing tab immediately after sigwinch 
+         # produces '' instead of $'\t' on my 3.2.57(1)-release 
+         # declare -- c=" " #  $'\t'
+         # declare -- c=""  #  ''
+
+         # tab - move to next cell
+         $'\t')
+            ((current_col==word_len)) || {
+                printf %s "$normal"
+                printf %s "${guess[current_col-1]}"
+                ((current_col++))
+                printf %s "$backspace"
+                printf %s "$next_cell"
+                printf %s "$reverse"
+                printf %s "${guess[current_col-1]}"
+                printf %s "$normal"
+                printf %s "$backspace"
+
+                ((cell_num++))
+                printf %s "$alert"
+                printf %s "$clear_line"
+                printf %s "$cell_num"
+            }
+            ;;
+
+        # ctrl-l - move to first cell in row
+        $'\f')
+            # redraw current cell in normal
+            printf %s "$normal"
+            printf %s "${guess[current_col-1]}"
+
+            # move back to first cell in row
+            current_col=1
+            printf "\r"
+            printf %s "$leftpad$vertical "
+            printf %s "$reverse"
+            printf %s "${guess[current_col-1]}"
+            printf %s "$normal"
+            printf %s "$backspace"
+
+            ((cell_num = ((current_row - 1) * word_len) + 1))
+            printf %s "$alert"
+            printf %s "$clear_line"
+            printf %s "$cell_num"
+            ;;
+
+        # ctrl-r - reveal game
+        $'\022')
+            game_over=True
+            result=lose
+            break
+            ;;
+        esac
+    done
+
+    # play again? (Q)uit/(N)o 
+    [[ $game_over ]] && {
+        display_result
+        paused_during_display=False
+        while IFS= read -s -r -d '' -n 1 c
+        do
+            [[ $game_paused = True ]] && {
+                continue
+            }
+            # https://github.com/dylanaraps/fff/issues/48
+            [[ $paused_during_display = True ]] && {
+                paused_during_display=False
+               ((BASH_VERSINFO[0] > 3)) && continue
+            }
+            # play again? (Q)uit/(N)o 
+            [[ $c = [QN] ]] && goodbye
+            play 
+        done
+    }
+}
+
+goodbye () { 
+    [[ $game_start ]] || { printf "\r\n"; exit; }
+
+    printf "$clear_screen"
+    ((term_height < game_height)) && exit
+
+    ((word_len > 7)) && word_len=7
+    ((game_width = (4 * word_len) + 1))
+    while ((term_width < game_width)) 
+    do
+        ((word_len--))
+        ((game_width = (4 * word_len) + 1))
+    done 
+
+    ((word_len == 1)) && exit
+
+    farewells=(\& CU BYE CIAO ADIOS SEEYOU GOODBYE)
+    farewell=${farewells[word_len-1]}
+
+    word=()
+    for ((i=0; i<${#farewell}; i++))
+    do 
+        word[i]=${farewell:i:1}
+    done
+
+
+    # recalculate padding and display areas
+    ((start_y = (term_width - game_width) / 2))
+
+    # if we are now too wide - resize to fit
+    ((start_col)) && {
+        ((start_col--))
+        ((needed_width = game_width + start_col))
+        ((offset = term_width - needed_width))
+        ((offset < 0))  && ((start_col += offset))
+    }
+
+    start_y=${start_col:-$start_y}
+    ((mood_y = start_y + game_width - 3))
+    mood=$(tput cup "$alert_x" "$mood_y")
+    printf -v leftpad "%*s" "$start_y"
+
+    build_grid
+    printf %s "$top_left_screen"
+    printf %s "$leftpad$score$clear_line"
+
+    result=bye
+    build_keyboard
+    display_result
+
+    printf %s "$save_cursor"
+    for ((i=0; i<=keyboard_height; i++))
+    do
+        printf %s "$clear_line"
+        printf "\r\n"
+    done
+    printf %s "$restore_cursor"
+    printf %s "$show_cursor"
+
+    exit
+}
+
+# FIXME resizing in "hard-mode" does not redraw
+#       the "required" notification
+#
+# FIXME resizing requires keypress on bash > 3
+#       https://github.com/dylanaraps/fff/issues/48
+resize_game () {
+    [[ $disco ]] && { 
+        check_terminal || return
+        printf %s "$clear_screen"
+        build_screen
+        return
+    }
+
+    # use current keyboard state as our new "qwerty"
+    qwerty=()
+    letters_remaining=${keyboard//[$' \r\n']}
+    for ((i=0; i<${#letters_remaining}; i++))
+    do
+        letter=${letters_remaining:i:1}
+        qwerty+=("$letter")
+    done
+
+    paused_during_display=True
+    game_paused=True
+    printf %s "$clear_screen"
+    # FIXME "pause the game while terminal is too small?"
+    check_terminal ||  return
+    game_paused=False
+    [[ $game_start ]] || return
+    build_screen
+    build_grid
+
+    build_keyboard
+
+    # if result is currently being displayed - redraw it
+    [[ $game_over ]] && { 
+        # FIXME calling display_result increments score 
+        [[ $result = win ]] && ((score--))
+        display_result
+        printf %s "$keyboard"
+        return
+    }
+
+    # else we "restore" the grid state
+    printf %s "$hide_cursor"
+    printf %s "$top_left_screen"
+    printf %s "$leftpad$score"
+
+    printf "\r\n"
+    printf %s "$save_cursor"
+    printf %s "$alert"
+    printf %s "$cell_num"
+    printf %s "$restore_cursor"
+
+    for line in "${grid[@]}"
+    do
+        printf %s "$leftpad$line"
+        printf "\r\n"
+    done
+    printf %s "$keyboard"
+
+    printf %s "$top_left_screen"
+    printf "\r\n\r\n"
+
+    printf %s "$leftpad"
+    printf %s "$vertical"
+    for value in "${greens[@]}"
+    do
+        printf %s " $value $vertical"
+    done
+
+    printf %s "${cells[0]}"
+    printf %s "$backspace"
+    printf %s "$backspace"
+
+    for line in "${guess_log[@]}"
+    do
+        printf %s "$line"
+        printf "\r\n\r\n"
+        printf %s "$leftpad"
+    done
+
+    printf %s "$vertical"
+    for value in "${guess[@]}"
+    do
+        printf %s " $value $vertical"
+    done
+
+    printf %s "${cells[${cell_num:-1}-1]}"
+
+    # "show cursor"
+    printf %s "$reverse"
+    printf %s "${guess[${current_col:-1}-1]}"
+    printf %s "$normal"
+    printf %s "$backspace"
+}
+
+main () {
+    terminal_settings=$(stty -g)
+
+    trap '{ 
+        printf %s "$show_cursor"
+        stty "$terminal_settings"
+    }' exit
+
+    trap '{
+        term_width=$(tput cols)
+        term_height=$(tput lines)
+        goodbye
+    }'  sigint
+
+    trap 'resize_game' sigwinch
+
+    parse_args "$@"
+
+    check_terminal
+
+    build_screen
+    # read -s still showed visible chars 
+    # with enough force
+    stty raw -echo
+    play
+}
+
+main "$@"
