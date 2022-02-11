@@ -23,7 +23,9 @@ https://github.com/thisisparker/cursewords
 
 # Usage
 
-It looks for the wordle answer and guess files by default.
+It looks for the `
+wordle_answers.txt` and `
+wordle_guesses.txt`  files by default.
 
 `--words` can be used to specify a single file for both answers and guesses. 
 
