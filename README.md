@@ -29,6 +29,10 @@ wordle_guesses.txt`  files by default.
 
 `--words` can be used to specify a single file for both answers and guesses. 
 
+    wordshl: an (attempted) TUI Wordle clone for bash.
+    ┌₁──┬₂──┬₃──┬₄──┬₅──┬₆──┬₇──┐
+    | W | O | R | D | S | H | L |
+    └───┴───┴───┴───┴───┴───┴───┘
     --strict      on|off  [default: on]
         Guesses must be a valid word from guess file
 
